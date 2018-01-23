@@ -106,7 +106,7 @@ public class DefaultHttp2RemoteFlowController implements Http2RemoteFlowControll
 
             @Override
             public void onStreamHalfClosed(Http2Stream stream) {
-                if (HALF_CLOSED_LOCAL.equals(stream.state())) {
+                if (HALF_CLOSED_LOCAL == stream.state()) {
                     /**
                      * When this method is called there should not be any
                      * pending frames left if the API is used correctly. However,
@@ -482,8 +482,11 @@ public class DefaultHttp2RemoteFlowController implements Http2RemoteFlowControll
 
             FlowControlled frame = pendingWriteQueue.poll();
             if (frame != null) {
+                // If cause == null this method was called via onStreamClosed(...) or onStreamHalfClosed(...)
+                Http2Error error = cause == null ? Http2Error.STREAM_CLOSED : INTERNAL_ERROR;
+
                 // Only create exception once and reuse to reduce overhead of filling in the stacktrace.
-                final Http2Exception exception = streamError(stream.id(), INTERNAL_ERROR, cause,
+                final Http2Exception exception = streamError(stream.id(), error, cause,
                         "Stream closed before write could take place");
                 do {
                     writeError(frame, exception);
