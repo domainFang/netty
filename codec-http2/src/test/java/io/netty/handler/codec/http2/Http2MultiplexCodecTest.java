@@ -303,18 +303,28 @@ public class Http2MultiplexCodecTest {
     }
 
     @Test(expected = ClosedChannelException.class)
-    public void streamClosedErrorTranslatedToClosedChannelException() throws Exception {
-        LastInboundHandler inboundHandler = streamActiveAndWriteHeaders(inboundStream);
+    public void streamClosedErrorTranslatedToClosedChannelExceptionOnWrites() throws Exception {
+        writer = new Writer() {
+            @Override
+            void write(Object msg, ChannelPromise promise) {
+                promise.tryFailure(new StreamException(inboundStream.id(), Http2Error.STREAM_CLOSED, "Stream Closed"));
+            }
+        };
+        LastInboundHandler inboundHandler = new LastInboundHandler();
+        childChannelInitializer.handler = inboundHandler;
 
-        assertTrue(inboundHandler.isChannelActive());
-        StreamException cause = new StreamException(inboundStream.id(), Http2Error.STREAM_CLOSED, "Closed");
-        Http2FrameStreamException http2Ex = new Http2FrameStreamException(
-                inboundStream, cause.error(), cause);
-        codec.onHttp2FrameStreamException(http2Ex);
-        parentChannel.runPendingTasks();
+        Channel childChannel = newOutboundStream();
+        assertTrue(childChannel.isActive());
 
-        assertFalse(inboundHandler.isChannelActive());
+        ChannelFuture future = childChannel.writeAndFlush(new DefaultHttp2HeadersFrame(new DefaultHttp2Headers()));
+        parentChannel.flush();
+
+        assertFalse(childChannel.isActive());
+        assertFalse(childChannel.isOpen());
+
         inboundHandler.checkException();
+
+        future.syncUninterruptibly();
     }
 
     @Test

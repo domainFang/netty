@@ -441,6 +441,7 @@ public class Http2MultiplexCodec extends Http2FrameCodec {
         // We start with the writability of the channel when creating the StreamChannel.
         private volatile boolean writable;
 
+        private boolean outboundClosed;
         private boolean closePending;
         private boolean readInProgress;
         private Queue<Object> inboundBuffer;
@@ -776,20 +777,7 @@ public class Http2MultiplexCodec extends Http2FrameCodec {
         }
 
         void fireChildExceptionCaught(Throwable cause) {
-            Throwable error = wrapStreamClosedError(cause);
-            pipeline().fireExceptionCaught(error);
-            if (error instanceof ClosedChannelException) {
-                unsafe().closeForcibly();
-            }
-        }
-
-        private Throwable wrapStreamClosedError(Throwable cause) {
-            // If the error was caused by STREAM_CLOSED we should use a ClosedChannelException to better
-            // mimic other transports and make it easier to reason about what exceptions to expect.
-            if (cause instanceof Http2Exception && ((Http2Exception) cause).error() == Http2Error.STREAM_CLOSED) {
-                return new ClosedChannelException().initCause(cause);
-            }
-            return cause;
+            pipeline().fireExceptionCaught(cause);
         }
 
         private final class Http2ChannelUnsafe implements Unsafe {
@@ -887,7 +875,8 @@ public class Http2MultiplexCodec extends Http2FrameCodec {
 
                     // Only ever send a reset frame if the connection is still alive as otherwise it makes no sense at
                     // all anyway.
-                    if (parent().isActive() && !streamClosedWithoutError && isStreamIdValid(stream().id())) {
+                    if (!outboundClosed && parent().isActive() &&
+                            !streamClosedWithoutError && isStreamIdValid(stream().id())) {
                         Http2StreamFrame resetFrame = new DefaultHttp2ResetFrame(Http2Error.CANCEL).stream(stream());
                         write(resetFrame, unsafe().voidPromise());
                         flush();
@@ -907,6 +896,7 @@ public class Http2MultiplexCodec extends Http2FrameCodec {
                     if (isRegistered()) {
                         deregister(unsafe().voidPromise());
                     }
+                    outboundClosed = true;
                     promise.setSuccess();
                     closePromise.setSuccess();
                 } finally {
@@ -1008,7 +998,7 @@ public class Http2MultiplexCodec extends Http2FrameCodec {
                     return;
                 }
 
-                if (!isActive()) {
+                if (!isActive() || outboundClosed) {
                     ReferenceCountUtil.release(msg);
                     promise.setFailure(CLOSED_CHANNEL_EXCEPTION);
                     return;
@@ -1075,6 +1065,7 @@ public class Http2MultiplexCodec extends Http2FrameCodec {
                     promise.setSuccess();
                 } else {
                     promise.setFailure(wrapStreamClosedError(cause));
+                    // If the first write fails there is not much we can do, just close
                     closeForcibly();
                 }
             }
@@ -1086,11 +1077,25 @@ public class Http2MultiplexCodec extends Http2FrameCodec {
                 } else {
                     Throwable error = wrapStreamClosedError(cause);
                     promise.setFailure(error);
+
                     if (error instanceof ClosedChannelException) {
-                        // Close channel if needed.
-                        closeForcibly();
+                        if (config.isAutoClose()) {
+                            // Close channel if needed.
+                            closeForcibly();
+                        } else {
+                            outboundClosed = true;
+                        }
                     }
                 }
+            }
+
+            private Throwable wrapStreamClosedError(Throwable cause) {
+                // If the error was caused by STREAM_CLOSED we should use a ClosedChannelException to better
+                // mimic other transports and make it easier to reason about what exceptions to expect.
+                if (cause instanceof Http2Exception && ((Http2Exception) cause).error() == Http2Error.STREAM_CLOSED) {
+                    return new ClosedChannelException().initCause(cause);
+                }
+                return cause;
             }
 
             private Http2StreamFrame validateStreamFrame(Http2StreamFrame frame) {
